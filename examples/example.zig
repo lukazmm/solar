@@ -38,7 +38,7 @@ pub fn main() !void {
     // Instance
 
     var instance = try Instance.create(allocator, &loader, .{});
-    defer instance.destroy(&loader);
+    defer instance.destroy();
 
     std.debug.print("Created Vulkan Instance\n", .{});
     std.debug.print("Num Adapters: {}\n", .{instance.numAdapters()});
@@ -54,4 +54,6 @@ pub fn main() !void {
 
     var device = try Device.create(allocator, &instance, null, .{});
     defer device.destroy();
+
+    std.debug.print("Created Vulkan Device\n", .{});
 }

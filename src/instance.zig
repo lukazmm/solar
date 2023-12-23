@@ -166,8 +166,9 @@ const InstanceDispatch = vk.InstanceWrapper(.{
     .enumeratePhysicalDevices = true,
     .getPhysicalDeviceFeatures2 = true,
     .getPhysicalDeviceProperties2 = true,
-    .getPhysicalDeviceQueueFamilyProperties2 = true,
+    .getPhysicalDeviceQueueFamilyProperties = true,
     .createDevice = true,
+    .getDeviceProcAddr = true,
 });
 
 /// Feature flags for instance creation.
@@ -203,7 +204,11 @@ pub const Instance = struct {
     handle: vk.Instance,
     adapters: []vk.PhysicalDevice,
 
-    /// Creates an instance.
+    // Config
+    layers: ArrayListUnmanaged([*:0]const u8),
+    extensions: ArrayListUnmanaged([*:0]const u8),
+
+    /// Creates a new instance from the given configuration. The loader must outlive this instance.
     pub fn create(allocator: Allocator, loader: *const Loader, config: InstanceConfig) InstanceCreateError!Instance {
         // App Info
         const app_info: vk.ApplicationInfo = .{
@@ -225,10 +230,10 @@ pub const Instance = struct {
 
         // Enabled
         var enabled_extensions = ArrayList([*:0]const u8).init(allocator);
-        defer enabled_extensions.deinit();
+        errdefer enabled_extensions.deinit();
 
         var enabled_layers = ArrayList([*:0]const u8).init(allocator);
-        defer enabled_layers.deinit();
+        errdefer enabled_layers.deinit();
 
         if (config.flags.validation and supportsLayer(supported_layers, "VK_LAYER_KHRONOS_validation")) {
             try enabled_layers.append("VK_LAYER_KHRONOS_validation");
@@ -288,21 +293,29 @@ pub const Instance = struct {
             .vki = vki,
             .handle = handle,
             .adapters = adapters_owned,
+            .extensions = enabled_extensions,
+            .layers = enabled_layers,
         };
     }
 
     /// Destroys and frees an instance. The loader used to create the instance must still be alive.
     pub fn destroy(self: *Instance) void {
+        self.layers.deinit(self.gpa);
+        self.extensions.deinit(self.gpa);
+
         self.gpa.free(self.adapters);
+
         self.vki.destroyInstance(self.handle, null);
 
         self.* = undefined;
     }
 
+    /// Returns the number of valid adapters that can be enumerated by this instance.
     pub fn numAdapters(self: *const Instance) usize {
         return self.adapters.len;
     }
 
+    /// Retrieves the adapter handle and properties corresponding to the given index.
     pub fn enumerateAdapters(self: *const Instance, idx: usize) Adapter {
         // Assert index in bounds
         assert(idx < self.numAdapters());
@@ -320,7 +333,7 @@ pub const Instance = struct {
             .integrated_gpu => .integrated,
             .virtual_gpu => .virtual,
             .cpu => .software,
-            else => .other,
+            else => .unknown,
         };
 
         return .{
@@ -330,32 +343,7 @@ pub const Instance = struct {
         };
     }
 
-    // fn scoreAdapter(vki: InstanceDispatch, adapter: vk.PhysicalDevice) usize {
-    //     var props: vk.PhysicalDeviceProperties2 = .{ .properties = undefined };
-    //     vki.getPhysicalDeviceProperties2(adapter, &props);
-
-    //     const props10 = props.properties;
-
-    //     var score: usize = 1;
-
-    //     // Discrete GPUs have a large performance advantage
-    //     if (props10.device_type == .discrete_gpu) {
-    //         score += 1000;
-    //     }
-
-    //     // Integrated gpus are still better than software rendering
-    //     if (props10.device_type == .integrated_gpu) {
-    //         score += 100;
-    //     }
-
-    //     // Vulkan 1.3 must be supported
-    //     if (props10.api_version < vk.API_VERSION_1_3) {
-    //         score = 0;
-    //     }
-
-    //     return score;
-    // }
-
+    /// Helper function to enumerate physical devices
     fn allocPhysicalDevices(allocator: Allocator, vki: InstanceDispatch, instance: vk.Instance) ![]vk.PhysicalDevice {
         var physical_device_count: u32 = undefined;
 
@@ -373,6 +361,7 @@ pub const Instance = struct {
         return physical_devices;
     }
 
+    /// Helper function to determine if the physical device supports the minimum API version.
     fn isPhysicalDeviceSuitable(vki: InstanceDispatch, handle: vk.PhysicalDevice) bool {
         var props: vk.PhysicalDeviceProperties2 = .{ .properties = undefined };
         vki.getPhysicalDeviceProperties2(handle, &props);
@@ -382,6 +371,7 @@ pub const Instance = struct {
         return props10.api_version >= vk.API_VERSION_1_3;
     }
 
+    /// Helper function for determining if an extension is supported by this instance.
     fn supportsExtension(extensions: []vk.ExtensionProperties, ext: [*:0]const u8) bool {
         for (extensions) |extension| {
             const name: [*:0]const u8 = @ptrCast(&extension.name);
@@ -394,6 +384,7 @@ pub const Instance = struct {
         return false;
     }
 
+    /// Helper function to determin if a layer is supported by this instance.
     fn supportsLayer(layers: []vk.LayerProperties, lay: [*:0]const u8) bool {
         for (layers) |layer| {
             const name: [*:0]const u8 = @ptrCast(&layer.layer_name);
@@ -414,12 +405,18 @@ pub const Instance = struct {
 /// Used for storing adapter names inline.
 pub const MaxAdapterNameSize = vk.MAX_PHYSICAL_DEVICE_NAME_SIZE;
 
+/// Enumeration of the various kinds of adapters.
 pub const AdapterKind = enum {
+    /// An adapter which is integrated into the cpu chip (often sharing ram and other resources).
     integrated,
+    /// An adapter connected by PCIe bus.
     discrete,
+    /// An adapter in a virtual enviornment.
     virtual,
+    /// A software renderer.
     software,
-    other,
+    /// An unknown adapter kind.
+    unknown,
 };
 
 /// Represents a physical display adapter enumerated by the instance.
@@ -447,7 +444,7 @@ pub const Adapter = struct {
             .discrete => try writer.print("  Discrete GPU", .{}),
             .virtual => try writer.print("  Virtual GPU", .{}),
             .software => try writer.print("  Software GPU", .{}),
-            .other => try writer.print("  Unknown GPU Type", .{}),
+            .unknown => try writer.print("  Unknown GPU Type", .{}),
         }
     }
 };
