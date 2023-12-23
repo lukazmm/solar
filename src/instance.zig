@@ -68,13 +68,6 @@ pub const Loader = struct {
         return self.vkb.dispatch.vkGetInstanceProcAddr;
     }
 
-    // /// Enumerates the instance api version provided by the current loader.
-    // pub fn instanceVersion(self: *const LoaderDynamic) u32 {
-    //     return self.vkb.enumerateInstanceVersion() catch {
-    //         panic("Unable to enumerate vulkan instance version\n", .{});
-    //     };
-    // }
-
     /// A helper function for loading the appropriate dynamic library.
     fn loadDynLib(path: ?[]const u8) !DynLib {
         if (path) |p| {
@@ -107,6 +100,61 @@ pub const Loader = struct {
 
         return lib;
     }
+
+    /// Enumerates the instance api version provided by the current loader.
+    fn instanceVersion(self: *const Loader) u32 {
+        return self.vkb.enumerateInstanceVersion() catch {
+            panic("Unable to enumerate vulkan instance version\n", .{});
+        };
+    }
+
+    /// Retrieves supported instance layers
+    fn supportedLayers(self: *const Loader, allocator: Allocator) ![]vk.LayerProperties {
+        var supported_layer_count: u32 = undefined;
+
+        _ = self.vkb.enumerateInstanceLayerProperties(&supported_layer_count, null) catch |err| {
+            return switch (err) {
+                error.OutOfHostMemory => error.OutOfMemory,
+                else => error.Unknown,
+            };
+        };
+
+        const supported_layers = try allocator.alloc(vk.LayerProperties, @as(usize, supported_layer_count));
+        errdefer allocator.free(supported_layers);
+
+        _ = self.vkb.enumerateInstanceLayerProperties(&supported_layer_count, supported_layers.ptr) catch |err| {
+            return switch (err) {
+                error.OutOfHostMemory => error.OutOfMemory,
+                else => error.Unknown,
+            };
+        };
+
+        return supported_layers;
+    }
+
+    /// Retrieves supported instance extensions.
+    fn supportedExtensions(self: *const Loader, allocator: Allocator, layer_name: ?[*:0]const u8) ![]vk.ExtensionProperties {
+        var supported_ext_count: u32 = undefined;
+
+        _ = self.vkb.enumerateInstanceExtensionProperties(layer_name, &supported_ext_count, null) catch |err| {
+            return switch (err) {
+                error.OutOfHostMemory => error.OutOfMemory,
+                else => error.Unknown,
+            };
+        };
+
+        const supported_exts = try allocator.alloc(vk.ExtensionProperties, @as(usize, supported_ext_count));
+        errdefer allocator.free(supported_exts);
+
+        _ = self.vkb.enumerateInstanceExtensionProperties(layer_name, &supported_ext_count, supported_exts.ptr) catch |err| {
+            return switch (err) {
+                error.OutOfHostMemory => error.OutOfMemory,
+                else => error.Unknown,
+            };
+        };
+
+        return supported_exts;
+    }
 };
 
 // *********************************
@@ -118,6 +166,8 @@ const InstanceDispatch = vk.InstanceWrapper(.{
     .enumeratePhysicalDevices = true,
     .getPhysicalDeviceFeatures2 = true,
     .getPhysicalDeviceProperties2 = true,
+    .getPhysicalDeviceQueueFamilyProperties2 = true,
+    .createDevice = true,
 });
 
 /// Feature flags for instance creation.
@@ -154,7 +204,7 @@ pub const Instance = struct {
     adapters: []vk.PhysicalDevice,
 
     /// Creates an instance.
-    pub fn create(loader: *const Loader, allocator: Allocator, config: InstanceConfig) InstanceCreateError!Instance {
+    pub fn create(allocator: Allocator, loader: *const Loader, config: InstanceConfig) InstanceCreateError!Instance {
         // App Info
         const app_info: vk.ApplicationInfo = .{
             .p_application_name = config.app_name,
@@ -167,52 +217,13 @@ pub const Instance = struct {
         // ********************************
         // Extensions + Layers
 
-        var supported_layers: []vk.LayerProperties = &.{};
+        const supported_layers = try loader.supportedLayers(allocator);
         defer allocator.free(supported_layers);
 
-        var supported_extensions: []vk.ExtensionProperties = &.{};
+        const supported_extensions = try loader.supportedExtensions(allocator, null);
         defer allocator.free(supported_extensions);
 
-        {
-            // Layers
-            var supported_layer_count: u32 = undefined;
-
-            _ = loader.vkb.enumerateInstanceLayerProperties(&supported_layer_count, null) catch |err| {
-                return switch (err) {
-                    error.OutOfHostMemory => error.OutOfMemory,
-                    else => error.Unknown,
-                };
-            };
-
-            supported_layers = try allocator.alloc(vk.LayerProperties, @as(usize, supported_layer_count));
-
-            _ = loader.vkb.enumerateInstanceLayerProperties(&supported_layer_count, supported_layers.ptr) catch |err| {
-                return switch (err) {
-                    error.OutOfHostMemory => error.OutOfMemory,
-                    else => error.Unknown,
-                };
-            };
-
-            // Extensions
-            var supported_extension_count: u32 = undefined;
-
-            _ = loader.vkb.enumerateInstanceExtensionProperties(null, &supported_extension_count, null) catch |err| {
-                return switch (err) {
-                    error.OutOfHostMemory => error.OutOfMemory,
-                    else => error.Unknown,
-                };
-            };
-
-            supported_extensions = try allocator.alloc(vk.ExtensionProperties, @as(usize, supported_extension_count));
-
-            _ = loader.vkb.enumerateInstanceExtensionProperties(null, &supported_extension_count, supported_extensions.ptr) catch |err| {
-                return switch (err) {
-                    error.OutOfHostMemory => error.OutOfMemory,
-                    else => error.Unknown,
-                };
-            };
-        }
-
+        // Enabled
         var enabled_extensions = ArrayList([*:0]const u8).init(allocator);
         defer enabled_extensions.deinit();
 
@@ -256,62 +267,19 @@ pub const Instance = struct {
 
         // TODO portability enumeration
 
-        const candidate_count = blk: {
-            var res: u32 = undefined;
-            _ = vki.enumeratePhysicalDevices(handle, &res, null) catch {
-                return error.Unknown;
-            };
-            break :blk @as(usize, res);
-        };
-
-        const candidates = try allocator.alloc(vk.PhysicalDevice, candidate_count);
+        const candidates = try allocPhysicalDevices(allocator, vki, handle);
         defer allocator.free(candidates);
 
-        {
-            var count: u32 = @intCast(candidate_count);
-            _ = vki.enumeratePhysicalDevices(handle, &count, candidates.ptr) catch {
-                return error.Unknown;
-            };
-        }
+        var adapters: ArrayListUnmanaged(vk.PhysicalDevice) = .{};
+        errdefer adapters.deinit(allocator);
 
-        const AdapterScore = struct { score: usize, adapter: vk.PhysicalDevice };
-
-        var adapter_map = try allocator.alloc(AdapterScore, candidate_count);
-        defer allocator.free(adapter_map);
-
-        for (0..candidate_count) |i| {
-            adapter_map[i].adapter = candidates[i];
-            adapter_map[i].score = scoreAdapter(vki, candidates[i]);
-        }
-
-        // Sort according to score
-
-        const Ranker = struct {
-            pub fn betterAdapter(_: void, lhs: AdapterScore, rhs: AdapterScore) bool {
-                return lhs.score > rhs.score;
+        for (candidates) |candidate| {
+            if (isPhysicalDeviceSuitable(vki, candidate)) {
+                try adapters.append(allocator, candidate);
             }
-        };
-
-        std.sort.heap(AdapterScore, adapter_map, void{}, Ranker.betterAdapter);
-
-        // Build slice of candidates which passed ranking
-
-        var adapter_count: usize = candidate_count;
-
-        while (adapter_count > 0) {
-            if (adapter_map[adapter_count - 1].score > 0) {
-                break;
-            }
-
-            adapter_count -= 1;
         }
 
-        const adapters = try allocator.alloc(vk.PhysicalDevice, adapter_count);
-        errdefer allocator.free(adapters);
-
-        for (0..adapter_count) |i| {
-            adapters[i] = adapter_map[i].adapter;
-        }
+        const adapters_owned = try adapters.toOwnedSlice(allocator);
 
         // ********************************
 
@@ -319,14 +287,15 @@ pub const Instance = struct {
             .gpa = allocator,
             .vki = vki,
             .handle = handle,
-            .adapters = adapters,
+            .adapters = adapters_owned,
         };
     }
 
-    /// Destroys and frees an instance created using this loader.
-    pub fn destroy(self: *Instance, _: *const Loader) void {
+    /// Destroys and frees an instance. The loader used to create the instance must still be alive.
+    pub fn destroy(self: *Instance) void {
         self.gpa.free(self.adapters);
         self.vki.destroyInstance(self.handle, null);
+
         self.* = undefined;
     }
 
@@ -334,25 +303,19 @@ pub const Instance = struct {
         return self.adapters.len;
     }
 
-    pub fn adapterInfo(self: *const Instance, idx: usize) AdapterInfo {
+    pub fn enumerateAdapters(self: *const Instance, idx: usize) Adapter {
+        // Assert index in bounds
         assert(idx < self.numAdapters());
-
-        // Adapter corresponding to the given index
-        const adapter = self.adapters[idx];
-
-        // var features: vk.PhysicalDeviceFeatures2 = .{};
-        // self.vki.getPhysicalDeviceFeatures2(adapter, &features);
-
+        // Retrieve adapter handle
+        const handle = self.adapters[idx];
+        // Get Properties
         var properties: vk.PhysicalDeviceProperties2 = .{ .properties = undefined };
-        self.vki.getPhysicalDeviceProperties2(adapter, &properties);
+        self.vki.getPhysicalDeviceProperties2(handle, &properties);
 
-        // const feats10 = features.features;
-        // _ = feats10;
+        // Get Vk 1.0 properties
         const props10 = properties.properties;
-
-        var info: AdapterInfo = undefined;
-        info.name = props10.device_name;
-        info.kind = switch (props10.device_type) {
+        const name = props10.device_name;
+        const kind: AdapterKind = switch (props10.device_type) {
             .discrete_gpu => .discrete,
             .integrated_gpu => .integrated,
             .virtual_gpu => .virtual,
@@ -360,33 +323,63 @@ pub const Instance = struct {
             else => .other,
         };
 
-        return info;
+        return .{
+            .handle = self.adapters[idx],
+            .m_name = name,
+            .m_kind = kind,
+        };
     }
 
-    fn scoreAdapter(vki: InstanceDispatch, adapter: vk.PhysicalDevice) usize {
+    // fn scoreAdapter(vki: InstanceDispatch, adapter: vk.PhysicalDevice) usize {
+    //     var props: vk.PhysicalDeviceProperties2 = .{ .properties = undefined };
+    //     vki.getPhysicalDeviceProperties2(adapter, &props);
+
+    //     const props10 = props.properties;
+
+    //     var score: usize = 1;
+
+    //     // Discrete GPUs have a large performance advantage
+    //     if (props10.device_type == .discrete_gpu) {
+    //         score += 1000;
+    //     }
+
+    //     // Integrated gpus are still better than software rendering
+    //     if (props10.device_type == .integrated_gpu) {
+    //         score += 100;
+    //     }
+
+    //     // Vulkan 1.3 must be supported
+    //     if (props10.api_version < vk.API_VERSION_1_3) {
+    //         score = 0;
+    //     }
+
+    //     return score;
+    // }
+
+    fn allocPhysicalDevices(allocator: Allocator, vki: InstanceDispatch, instance: vk.Instance) ![]vk.PhysicalDevice {
+        var physical_device_count: u32 = undefined;
+
+        _ = vki.enumeratePhysicalDevices(instance, &physical_device_count, null) catch {
+            return error.Unknown;
+        };
+
+        const physical_devices = try allocator.alloc(vk.PhysicalDevice, @as(usize, physical_device_count));
+        errdefer allocator.free(physical_devices);
+
+        _ = vki.enumeratePhysicalDevices(instance, &physical_device_count, physical_devices.ptr) catch {
+            return error.Unknown;
+        };
+
+        return physical_devices;
+    }
+
+    fn isPhysicalDeviceSuitable(vki: InstanceDispatch, handle: vk.PhysicalDevice) bool {
         var props: vk.PhysicalDeviceProperties2 = .{ .properties = undefined };
-        vki.getPhysicalDeviceProperties2(adapter, &props);
+        vki.getPhysicalDeviceProperties2(handle, &props);
 
         const props10 = props.properties;
 
-        var score: usize = 1;
-
-        // Discrete GPUs have a large performance advantage
-        if (props10.device_type == .discrete_gpu) {
-            score += 1000;
-        }
-
-        // Integrated gpus are still better than software rendering
-        if (props10.device_type == .integrated_gpu) {
-            score += 100;
-        }
-
-        // Vulkan 1.3 must be supported
-        if (props10.api_version < vk.API_VERSION_1_3) {
-            score = 0;
-        }
-
-        return score;
+        return props10.api_version >= vk.API_VERSION_1_3;
     }
 
     fn supportsExtension(extensions: []vk.ExtensionProperties, ext: [*:0]const u8) bool {
@@ -418,6 +411,9 @@ pub const Instance = struct {
 // Adapter Info ***************************
 // ****************************************
 
+/// Used for storing adapter names inline.
+pub const MaxAdapterNameSize = vk.MAX_PHYSICAL_DEVICE_NAME_SIZE;
+
 pub const AdapterKind = enum {
     integrated,
     discrete,
@@ -426,17 +422,27 @@ pub const AdapterKind = enum {
     other,
 };
 
-pub const MaxAdapterNameSize = vk.MAX_PHYSICAL_DEVICE_NAME_SIZE;
+/// Represents a physical display adapter enumerated by the instance.
+pub const Adapter = struct {
+    /// Handle to underlying vkPhysicalDevice
+    handle: vk.PhysicalDevice,
+    /// An inline storage buffer for the name of the adapter
+    m_name: [MaxAdapterNameSize]u8,
+    m_kind: AdapterKind,
 
-pub const AdapterInfo = struct {
-    name: [MaxAdapterNameSize]u8,
-    kind: AdapterKind,
+    pub fn name(self: *const Adapter) [:0]const u8 {
+        const m_name: [*:0]const u8 = @ptrCast(&self.m_name);
+        return span(m_name);
+    }
 
-    pub fn format(value: @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) std.os.WriteError!void {
-        const name: [*:0]const u8 = @ptrCast(&value.name);
-        try writer.print("Display Adapter: {s}\n", .{span(name)});
+    pub fn kind(self: Adapter) AdapterKind {
+        return self.m_kind;
+    }
 
-        switch (value.kind) {
+    pub fn format(self: *const @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) std.os.WriteError!void {
+        try writer.print("Display Adapter: {s}\n", .{self.name()});
+
+        switch (self.kind()) {
             .integrated => try writer.print("  Integrated GPU", .{}),
             .discrete => try writer.print("  Discrete GPU", .{}),
             .virtual => try writer.print("  Virtual GPU", .{}),

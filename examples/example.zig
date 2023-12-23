@@ -5,6 +5,8 @@ const panic = std.debug.panic;
 const solar = @import("solar");
 const Loader = solar.Loader;
 const Instance = solar.Instance;
+const Adapter = solar.Adapter;
+const Device = solar.Device;
 
 pub fn main() !void {
     // Setup Allocator
@@ -35,15 +37,21 @@ pub fn main() !void {
     // **************************
     // Instance
 
-    var instance = try Instance.create(&loader, allocator, .{});
+    var instance = try Instance.create(allocator, &loader, .{});
     defer instance.destroy(&loader);
 
     std.debug.print("Created Vulkan Instance\n", .{});
     std.debug.print("Num Adapters: {}\n", .{instance.numAdapters()});
 
     for (0..instance.numAdapters()) |i| {
-        const info = instance.adapterInfo(i);
+        const adapter = instance.enumerateAdapters(i);
 
-        std.debug.print("\n{}\n", .{info});
+        std.debug.print("\n{}\n", .{adapter});
     }
+
+    // **************************
+    // Device
+
+    var device = try Device.create(allocator, &instance, null, .{});
+    defer device.destroy();
 }

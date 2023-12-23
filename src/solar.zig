@@ -8,8 +8,12 @@ pub const InstanceConfig = instance.InstanceConfig;
 pub const InstanceFlags = instance.InstanceFlags;
 pub const InstanceCreateError = instance.InstanceCreateError;
 
+pub const Adapter = instance.Adapter;
 pub const AdapterKind = instance.AdapterKind;
-pub const AdapterInfo = instance.AdapterInfo;
+
+pub const Device = device.Device;
+pub const DeviceConfig = device.DeviceConfig;
+pub const DeviceFlags = device.DeviceFlags;
 
 test {
     _ = device;
