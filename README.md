@@ -4,6 +4,6 @@
 
 # Design Goals
 
-This project seeks to simplify some of the (in my opinion) strange aspects of the Vulkan API, removing some of the annoying constructs and boilerplate. In a sense this is my _ideal_ graphics + compute API, merging the best aspects of Vulkan, D3D12, and Metal, while providing some utilty features (such as less tedious memory management using the `Vulkan Memory Allocator` library).
+This project seeks to simplify some of the (in my opinion) strange aspects of the Vulkan API, removing some of the annoying constructs and boilerplate. In a sense this is my _ideal_ graphics + compute API, merging the best aspects of Vulkan, D3D12, and Metal, while providing some utilty features (less tedious memory management using the `Vulkan Memory Allocator` library, image loading with `stb_image`, etc.).
 
 Note, currently all third party libraries are copied inline into the `vendor/` directory. This will change once `zig`'s package management situation becomes a bit more stable (for instance, after the release of `0.12` or `0.13`).

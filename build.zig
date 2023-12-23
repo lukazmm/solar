@@ -18,13 +18,23 @@ pub fn build(b: *std.Build) void {
 
     // Add vulkan binding generation step
     const path = std.os.getenv("VULKAN_SDK");
-
     const gen = vkgen.VkGenerateStep.createFromSdk(b, path.?);
+
+    // Get solar module
+    const module = b.addModule("solar", .{
+        .source_file = .{ .path = "src/solar.zig" },
+        .dependencies = &.{.{
+            .name = "vulkan",
+            .module = gen.getModule(),
+        }},
+    });
+
+    // ***********************
+    // Build Static Library **
+    // ***********************
 
     const lib = b.addStaticLibrary(.{
         .name = "solar",
-        // In this case the main source file is merely a path, however, in more
-        // complicated build scripts, this could be a generated file.
         .root_source_file = .{ .path = "src/solar.zig" },
         .target = target,
         .optimize = optimize,
@@ -33,7 +43,7 @@ pub fn build(b: *std.Build) void {
     // Mainly for dlopen (may be able to remove at some point)
     lib.linkLibC();
 
-    // Add modules
+    // Modules
     lib.addModule("vulkan", gen.getModule());
 
     // This declares intent for the library to be installed into the standard
@@ -41,19 +51,53 @@ pub fn build(b: *std.Build) void {
     // running `zig build`).
     b.installArtifact(lib);
 
+    // **************************
+    // Tests ********************
+    // **************************
+
     // Creates a step for unit testing. This only builds the test executable
     // but does not run it.
-    const main_tests = b.addTest(.{
+    const tests = b.addTest(.{
         .root_source_file = .{ .path = "src/solar.zig" },
         .target = target,
         .optimize = optimize,
     });
 
-    const run_main_tests = b.addRunArtifact(main_tests);
+    tests.addModule("vulkan", gen.getModule());
+
+    const run_tests = b.addRunArtifact(tests);
 
     // This creates a build step. It will be visible in the `zig build --help` menu,
     // and can be selected like this: `zig build test`
     // This will evaluate the `test` step rather than the default, which is "install".
     const test_step = b.step("test", "Run library tests");
-    test_step.dependOn(&run_main_tests.step);
+    test_step.dependOn(&run_tests.step);
+
+    // **************************
+    // Example ******************
+    // **************************
+
+    const example = b.addExecutable(.{
+        .name = "example",
+        .root_source_file = .{ .path = "examples/example.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+    // Enable libC
+    example.linkLibC();
+    // Dependent modules
+    example.addModule("solar", module);
+    // Install artifact
+    b.installArtifact(example);
+
+    // Add run command
+    const run_example_cmd = b.addRunArtifact(example);
+    run_example_cmd.step.dependOn(b.getInstallStep());
+
+    if (b.args) |args| {
+        run_example_cmd.addArgs(args);
+    }
+
+    const run_step = b.step("run-example", "Run the solar vk example");
+    run_step.dependOn(&run_example_cmd.step);
 }
