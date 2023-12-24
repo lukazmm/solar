@@ -1,5 +1,5 @@
 const device = @import("device.zig");
-const func_queue = @import("func_queue.zig");
+const func_buffer = @import("func_buffer.zig");
 const instance = @import("instance.zig");
 const queue = @import("queue.zig");
 
@@ -31,7 +31,7 @@ pub const QueueKind = queue.QueueKind;
 
 test {
     _ = device;
-    _ = func_queue;
+    _ = func_buffer;
     _ = instance;
     _ = queue;
 }
