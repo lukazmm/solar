@@ -1,5 +1,7 @@
 const device = @import("device.zig");
+const func_queue = @import("func_queue.zig");
 const instance = @import("instance.zig");
+const queue = @import("queue.zig");
 
 // ***************************
 // Instance
@@ -21,7 +23,15 @@ pub const Device = device.Device;
 pub const DeviceConfig = device.DeviceConfig;
 pub const DeviceFlags = device.DeviceFlags;
 
+// ****************************
+// Queue
+
+pub const QueueConfig = queue.QueueConfig;
+pub const QueueKind = queue.QueueKind;
+
 test {
     _ = device;
+    _ = func_queue;
     _ = instance;
+    _ = queue;
 }

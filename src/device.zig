@@ -1,8 +1,8 @@
 const std = @import("std");
 const ArrayList = std.ArrayList;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
-const DynLib = std.DynLib;
 const Allocator = std.mem.Allocator;
+const Mutex = std.Thread.Mutex;
 
 const assert = std.debug.assert;
 const panic = std.debug.panic;
@@ -18,9 +18,17 @@ const Adapter = instance_.Adapter;
 // Device ******************
 // *************************
 
+// pub const QueueKind = enum {
+//     direct,
+//     async_compute,
+//     async_transfer,
+// };
+
 const DeviceDispatch = vk.DeviceWrapper(.{
     .destroyDevice = true,
     .deviceWaitIdle = true,
+    .getDeviceQueue = true,
+    .queueSubmit2 = true,
 });
 
 /// Feature flags for device creation.
@@ -45,6 +53,21 @@ pub const Device = struct {
     vkd: DeviceDispatch,
     // Handle
     handle: vk.Device,
+    // Queues
+    direct: vk.Queue,
+    direct_family: u32,
+    direct_mutex: usize,
+
+    async_compute: vk.Queue,
+    async_compute_family: u32,
+    async_compute_mutex: usize,
+
+    async_transfer: vk.Queue,
+    async_transfer_family: u32,
+    async_transfer_mutex: usize,
+
+    // Mutexes
+    mutexes: [3]Mutex,
 
     pub fn create(allocator: Allocator, instance: *const Instance, adapter: ?*const Adapter, config: DeviceConfig) DeviceCreateError!Device {
         _ = config;
@@ -173,11 +196,57 @@ pub const Device = struct {
         const vkd = DeviceDispatch.loadNoFail(handle, instance.vki.dispatch.vkGetDeviceProcAddr);
         errdefer vkd.destroyDevice(handle, null);
 
-        // Return
+        // **********************
+        // Retrieve Queues
+
+        const direct_index: u32 = direct_family.?;
+        const direct_mutex: usize = 0;
+
+        var async_compute_index: u32 = undefined;
+        var async_compute_mutex: usize = undefined;
+
+        if (async_compute_family) |index| {
+            async_compute_index = index;
+            async_compute_mutex = 1;
+        } else {
+            async_compute_index = direct_index;
+            async_compute_mutex = direct_mutex;
+        }
+
+        var async_transfer_index: u32 = undefined;
+        var async_transfer_mutex: usize = undefined;
+
+        if (async_transfer_family) |index| {
+            async_transfer_index = index;
+            async_transfer_mutex = 2;
+        } else {
+            async_transfer_index = direct_index;
+            async_transfer_mutex = direct_mutex;
+        }
+
+        const direct = vkd.getDeviceQueue(handle, direct_index, 0);
+        const async_compute = vkd.getDeviceQueue(handle, async_compute_index, 0);
+        const async_transfer = vkd.getDeviceQueue(handle, async_transfer_index, 0);
+
+        // *******************************
 
         return .{
             .vkd = vkd,
             .handle = handle,
+
+            .direct = direct,
+            .direct_family = direct_index,
+            .direct_mutex = direct_mutex,
+
+            .async_compute = async_compute,
+            .async_compute_family = async_compute_index,
+            .async_compute_mutex = async_compute_mutex,
+
+            .async_transfer = async_transfer,
+            .async_transfer_family = async_transfer_index,
+            .async_transfer_mutex = async_transfer_mutex,
+
+            .mutexes = [3]Mutex{ .{}, .{}, .{} },
         };
     }
 
@@ -188,6 +257,24 @@ pub const Device = struct {
         self.vkd.destroyDevice(self.handle, null);
         // Invalidate handle
         self.* = undefined;
+    }
+
+    pub fn vkDirectSubmit(self: *const Device, submit_info: vk.SubmitInfo2) !void {
+        self.mutexes[self.direct_mutex].lock();
+        try self.vkd.queueSubmit2(self.direct, 1, &submit_info, .null_handle);
+        self.mutexes[self.direct_mutex].unlock();
+    }
+
+    pub fn vkAsyncComputeSubmit(self: *const Device, submit_info: vk.SubmitInfo2) !void {
+        self.mutexes[self.async_compute_mutex].lock();
+        try self.vkd.queueSubmit2(self.async_compute, 1, &submit_info, .null_handle);
+        self.mutexes[self.async_compute_mutex].unlock();
+    }
+
+    pub fn vkAsyncTransferSubmit(self: *const Device, submit_info: vk.SubmitInfo2) !void {
+        self.mutexes[self.async_transfer_mutex].lock();
+        try self.vkd.queueSubmit2(self.async_transfer, 1, &submit_info, .null_handle);
+        self.mutexes[self.async_transfer_mutex].unlock();
     }
 
     fn scoreAdapter(adapter: *const Adapter) usize {

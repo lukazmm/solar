@@ -229,14 +229,14 @@ pub const Instance = struct {
         defer allocator.free(supported_extensions);
 
         // Enabled
-        var enabled_extensions = ArrayList([*:0]const u8).init(allocator);
-        errdefer enabled_extensions.deinit();
+        var enabled_extensions: ArrayListUnmanaged([*:0]const u8) = .{};
+        errdefer enabled_extensions.deinit(allocator);
 
-        var enabled_layers = ArrayList([*:0]const u8).init(allocator);
-        errdefer enabled_layers.deinit();
+        var enabled_layers: ArrayListUnmanaged([*:0]const u8) = .{};
+        errdefer enabled_layers.deinit(allocator);
 
         if (config.flags.validation and supportsLayer(supported_layers, "VK_LAYER_KHRONOS_validation")) {
-            try enabled_layers.append("VK_LAYER_KHRONOS_validation");
+            try enabled_layers.append(allocator, "VK_LAYER_KHRONOS_validation");
         }
 
         // ******************************
