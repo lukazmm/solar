@@ -38,11 +38,23 @@ pub const DeviceConfig = struct {
     flags: DeviceFlags = .{},
 };
 
+// Device Errors
+
+/// Superset of all errors which can be returned by the device
+pub const DeviceError = error{
+    OutOfMemory,
+    OutOfDeviceMemory,
+    FeatureNotSupported,
+    FeatureNotEnabled,
+    DeviceLost,
+    Unknown,
+};
+
+/// Subset of `DeviceError` which may be returned on creation.
 pub const DeviceCreateError = error{
     OutOfMemory,
     OutOfDeviceMemory,
     NoSuitableAdapter,
-    NoDirectQueue,
     FeatureNotSupported,
     Lost,
     Unknown,
@@ -69,38 +81,8 @@ pub const Device = struct {
     // Mutexes
     mutexes: [3]Mutex,
 
-    pub fn create(allocator: Allocator, instance: *const Instance, adapter: ?*const Adapter, config: DeviceConfig) DeviceCreateError!Device {
+    pub fn create(allocator: Allocator, instance: *const Instance, adapter: *const Adapter, config: DeviceConfig) DeviceCreateError!Device {
         _ = config;
-
-        // ****************************
-        // Find best physical device
-
-        var physical_device: vk.PhysicalDevice = undefined;
-
-        if (adapter) |a| {
-            physical_device = a.handle;
-        } else {
-            const adapters: []Adapter = try allocator.alloc(Adapter, instance.numAdapters());
-            defer allocator.free(adapters);
-
-            for (0..instance.numAdapters()) |i| {
-                adapters[i] = instance.enumerateAdapters(i);
-            }
-
-            const Scorer = struct {
-                pub fn betterAdapter(_: void, lhs: Adapter, rhs: Adapter) bool {
-                    return scoreAdapter(&lhs) > scoreAdapter(&rhs);
-                }
-            };
-
-            std.sort.heap(Adapter, adapters, void{}, Scorer.betterAdapter);
-
-            if (adapters.len > 0 and isAdapterSuitable(&adapters[0])) {
-                physical_device = adapters[0].handle;
-            } else {
-                return DeviceCreateError.NoSuitableAdapter;
-            }
-        }
 
         // ********************************
         // Queues
@@ -110,12 +92,12 @@ pub const Device = struct {
 
         // Get queue families
         var queue_family_count: u32 = undefined;
-        instance.vki.getPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, null);
+        instance.vki.getPhysicalDeviceQueueFamilyProperties(adapter.handle, &queue_family_count, null);
 
         const queue_families = try allocator.alloc(vk.QueueFamilyProperties, @as(usize, queue_family_count));
         defer allocator.free(queue_families);
 
-        instance.vki.getPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, queue_families.ptr);
+        instance.vki.getPhysicalDeviceQueueFamilyProperties(adapter.handle, &queue_family_count, queue_families.ptr);
 
         var direct_family: ?u32 = null;
         var async_compute_family: ?u32 = null;
@@ -129,14 +111,13 @@ pub const Device = struct {
                 async_transfer_family = family_index;
             } else if (props.queue_flags.compute_bit and !props.queue_flags.graphics_bit) {
                 async_compute_family = family_index;
-            } else if (props.queue_flags.graphics_bit) {
+            } else if (props.queue_flags.graphics_bit and props.queue_flags.compute_bit) {
                 direct_family = family_index;
             }
         }
 
-        if (direct_family == null) {
-            return DeviceCreateError.NoDirectQueue;
-        }
+        // This check should have already been performed by instance
+        assert(direct_family != null);
 
         try queue_create_infos.append(
             allocator,
@@ -183,7 +164,7 @@ pub const Device = struct {
             .pp_enabled_layer_names = instance.layers.items.ptr,
         };
 
-        const handle = instance.vki.createDevice(physical_device, &create_info, null) catch |err| {
+        const handle = instance.vki.createDevice(adapter.handle, &create_info, null) catch |err| {
             return switch (err) {
                 error.OutOfHostMemory => error.OutOfMemory,
                 error.OutOfDeviceMemory => error.OutOfDeviceMemory,

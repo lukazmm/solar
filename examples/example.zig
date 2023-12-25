@@ -50,9 +50,18 @@ pub fn main() !void {
     }
 
     // **************************
+    // Adapter
+
+    const adapter = instance.defaultAdapter() orelse {
+        panic("No suitable adapter found\n", .{});
+    };
+
+    std.debug.print("Chose Adapter: {s}\n", .{adapter.name()});
+
+    // **************************
     // Device
 
-    var device = try Device.create(allocator, &instance, null, .{});
+    var device = try Device.create(allocator, &instance, &adapter, .{});
     defer device.destroy();
 
     std.debug.print("Created Vulkan Device\n", .{});

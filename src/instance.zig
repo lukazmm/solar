@@ -157,6 +157,32 @@ pub const Loader = struct {
     }
 };
 
+/// Helper function for determining if an extension is supported by this instance.
+fn supportsExtension(extensions: []vk.ExtensionProperties, ext: [*:0]const u8) bool {
+    for (extensions) |extension| {
+        const name: [*:0]const u8 = @ptrCast(&extension.name);
+
+        if (eql(u8, span(name), span(ext))) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/// Helper function to determin if a layer is supported by this instance.
+fn supportsLayer(layers: []vk.LayerProperties, lay: [*:0]const u8) bool {
+    for (layers) |layer| {
+        const name: [*:0]const u8 = @ptrCast(&layer.layer_name);
+
+        if (eql(u8, span(name), span(lay))) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 // *********************************
 // Instance ************************
 // *********************************
@@ -207,6 +233,10 @@ pub const Instance = struct {
     // Config
     layers: ArrayListUnmanaged([*:0]const u8),
     extensions: ArrayListUnmanaged([*:0]const u8),
+
+    // ********************************
+    // Creation ***********************
+    // ********************************
 
     /// Creates a new instance from the given configuration. The loader must outlive this instance.
     pub fn create(allocator: Allocator, loader: *const Loader, config: InstanceConfig) InstanceCreateError!Instance {
@@ -279,7 +309,7 @@ pub const Instance = struct {
         errdefer adapters.deinit(allocator);
 
         for (candidates) |candidate| {
-            if (isPhysicalDeviceSuitable(vki, candidate)) {
+            if (try isPhysicalDeviceSuitable(allocator, vki, candidate)) {
                 try adapters.append(allocator, candidate);
             }
         }
@@ -309,6 +339,67 @@ pub const Instance = struct {
 
         self.* = undefined;
     }
+
+    /// Helper function to enumerate physical devices
+    fn allocPhysicalDevices(allocator: Allocator, vki: InstanceDispatch, instance: vk.Instance) ![]vk.PhysicalDevice {
+        var physical_device_count: u32 = undefined;
+
+        _ = vki.enumeratePhysicalDevices(instance, &physical_device_count, null) catch {
+            return error.Unknown;
+        };
+
+        const physical_devices = try allocator.alloc(vk.PhysicalDevice, @as(usize, physical_device_count));
+        errdefer allocator.free(physical_devices);
+
+        _ = vki.enumeratePhysicalDevices(instance, &physical_device_count, physical_devices.ptr) catch {
+            return error.Unknown;
+        };
+
+        return physical_devices;
+    }
+
+    /// Helper function to determine if the physical device supports the minimum API version.
+    fn isPhysicalDeviceSuitable(allocator: Allocator, vki: InstanceDispatch, handle: vk.PhysicalDevice) !bool {
+        var props: vk.PhysicalDeviceProperties2 = .{ .properties = undefined };
+        vki.getPhysicalDeviceProperties2(handle, &props);
+
+        const props10 = props.properties;
+
+        // Require vk 1.3
+        if (props10.api_version < vk.API_VERSION_1_3) {
+            return false;
+        }
+
+        // Check queue families
+        var queue_family_count: u32 = undefined;
+        vki.getPhysicalDeviceQueueFamilyProperties(handle, &queue_family_count, null);
+
+        const queue_families = try allocator.alloc(vk.QueueFamilyProperties, @as(usize, queue_family_count));
+        defer allocator.free(queue_families);
+
+        vki.getPhysicalDeviceQueueFamilyProperties(handle, &queue_family_count, queue_families.ptr);
+
+        const has_direct_queue = blk: {
+            for (queue_families) |family| {
+                if (family.queue_flags.graphics_bit and family.queue_flags.compute_bit) {
+                    break :blk true;
+                }
+            }
+
+            break :blk false;
+        };
+
+        // Physical Device must have one "universal" queue
+        if (!has_direct_queue) {
+            return false;
+        }
+
+        return true;
+    }
+
+    // *****************************
+    // Adapters ********************
+    // *****************************
 
     /// Returns the number of valid adapters that can be enumerated by this instance.
     pub fn numAdapters(self: *const Instance) usize {
@@ -343,58 +434,40 @@ pub const Instance = struct {
         };
     }
 
-    /// Helper function to enumerate physical devices
-    fn allocPhysicalDevices(allocator: Allocator, vki: InstanceDispatch, instance: vk.Instance) ![]vk.PhysicalDevice {
-        var physical_device_count: u32 = undefined;
+    pub fn defaultAdapter(self: *const Instance) ?Adapter {
+        var score: usize = 0;
+        var result: ?usize = null;
 
-        _ = vki.enumeratePhysicalDevices(instance, &physical_device_count, null) catch {
-            return error.Unknown;
-        };
+        for (0..self.numAdapters()) |idx| {
+            const adapter = self.enumerateAdapters(idx);
+            const rank = rankAdapter(&adapter);
 
-        const physical_devices = try allocator.alloc(vk.PhysicalDevice, @as(usize, physical_device_count));
-        errdefer allocator.free(physical_devices);
-
-        _ = vki.enumeratePhysicalDevices(instance, &physical_device_count, physical_devices.ptr) catch {
-            return error.Unknown;
-        };
-
-        return physical_devices;
-    }
-
-    /// Helper function to determine if the physical device supports the minimum API version.
-    fn isPhysicalDeviceSuitable(vki: InstanceDispatch, handle: vk.PhysicalDevice) bool {
-        var props: vk.PhysicalDeviceProperties2 = .{ .properties = undefined };
-        vki.getPhysicalDeviceProperties2(handle, &props);
-
-        const props10 = props.properties;
-
-        return props10.api_version >= vk.API_VERSION_1_3;
-    }
-
-    /// Helper function for determining if an extension is supported by this instance.
-    fn supportsExtension(extensions: []vk.ExtensionProperties, ext: [*:0]const u8) bool {
-        for (extensions) |extension| {
-            const name: [*:0]const u8 = @ptrCast(&extension.name);
-
-            if (eql(u8, span(name), span(ext))) {
-                return true;
+            if (rank > score) {
+                result = idx;
+                score = rank;
             }
         }
 
-        return false;
+        return if (result) |idx|
+            self.enumerateAdapters(idx)
+        else
+            null;
     }
 
-    /// Helper function to determin if a layer is supported by this instance.
-    fn supportsLayer(layers: []vk.LayerProperties, lay: [*:0]const u8) bool {
-        for (layers) |layer| {
-            const name: [*:0]const u8 = @ptrCast(&layer.layer_name);
+    fn rankAdapter(adapter: *const Adapter) usize {
+        var score: usize = 0;
 
-            if (eql(u8, span(name), span(lay))) {
-                return true;
-            }
+        // Discrete GPUs have a large performance advantage
+        if (adapter.kind() == .discrete) {
+            score += 1000;
         }
 
-        return false;
+        // Integrated gpus are still better than software rendering
+        if (adapter.kind() == .integrated) {
+            score += 100;
+        }
+
+        return score;
     }
 };
 

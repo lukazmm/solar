@@ -2,22 +2,22 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 
-/// Metadata stored before the data storage of each function.
-const FuncMeta = struct {
-    func: FuncPtr,
-    size: usize,
-};
-
-/// Number of bytes `FuncMeta` fills.
-const meta_size = @sizeOf(FuncMeta);
-
-/// A type erased function pointer acting on a byte buffer which stores data.
-pub const FuncPtr = *const fn ([]u8) void;
-
 /// A buffer of storage for type erased lambdas.
 pub const FuncBuffer = struct {
     buffer: []u8,
     cursor: usize,
+
+    /// Metadata stored before the data storage of each function.
+    pub const Meta = struct {
+        func: Ptr,
+        size: usize,
+    };
+
+    /// Number of bytes `Meta` fills.
+    const meta_size = @sizeOf(Meta);
+
+    /// A type erased function pointer acting on a byte buffer which stores data.
+    pub const Ptr = *const fn ([]u8) void;
 
     /// Initializes a new function buffer of the specified size.
     pub fn init(allocator: Allocator, size: usize) !FuncBuffer {
@@ -40,14 +40,14 @@ pub const FuncBuffer = struct {
     /// which may be filled with enviornment data for the function. If there is insufficient capacity
     /// in the buffer, this returns `error.OutOfMemory`. Each allocation fills `meta_size + size` bytes
     /// of the buffer (where `meta_size` is usually 16 bytes).
-    pub fn alloc(self: *FuncBuffer, size: usize, func: FuncPtr) error{OutOfMemory}![]u8 {
+    pub fn alloc(self: *FuncBuffer, size: usize, func: Ptr) error{OutOfMemory}![]u8 {
         // Check the buffer for sufficient space
         if (self.cursor + meta_size + size > self.buffer.len) {
             return error.OutOfMemory;
         }
 
         // Stack space metadata for this allocation
-        const meta: FuncMeta = .{
+        const meta: Meta = .{
             .func = func,
             .size = size,
         };
@@ -72,7 +72,7 @@ pub const FuncBuffer = struct {
     /// Executes all function in the function buffer.
     pub fn execute(self: *FuncBuffer) void {
         // Stack space for meta data.
-        var meta: FuncMeta = undefined;
+        var meta: Meta = undefined;
         const meta_ptr: [*]u8 = @ptrCast(&meta);
         const meta_slice: []u8 = meta_ptr[0..meta_size];
         // Cursor moving through the function queue.
@@ -93,28 +93,27 @@ pub const FuncBuffer = struct {
     /// context in the bytes following the function pointer.
     pub fn enqueue(self: *FuncBuffer, context: anytype, comptime func: fn (@TypeOf(context)) void) error{OutOfMemory}!void {
         const Context: type = @TypeOf(context);
-        const Wrapper: type = FuncWrapper(Context, func);
         // Allocates sufficient space to store `context`.
-        const bytes = try self.alloc(@sizeOf(Context), &Wrapper.func);
+        const bytes = try self.alloc(@sizeOf(Context), &Wrapper(Context, func).erased);
         // Avoid zig compiler weirdness around taking addresses to arguments
         const ctx = context;
         const ptr: [*]const u8 = @ptrCast(&ctx);
         // Copy context to the given bytes
         @memcpy(bytes, ptr);
     }
-};
 
-/// A wrapper to perform type erasure on a function + context.
-fn FuncWrapper(comptime Context: type, comptime m_func: fn (Context) void) type {
-    return struct {
-        fn func(src: []u8) void {
-            // Stack storage for context
-            var stack: Context = undefined;
-            // This avoids problems with aligning context data.
-            const dest: [*]u8 = @ptrCast(&stack);
-            @memcpy(dest, src);
-            // Call original function
-            m_func(dest);
-        }
-    };
-}
+    /// A wrapper to perform type erasure on a function + context.
+    fn Wrapper(comptime Context: type, comptime m_func: fn (Context) void) type {
+        return struct {
+            fn erased(src: []u8) void {
+                // Stack storage for context
+                var stack: Context = undefined;
+                // This avoids problems with aligning context data.
+                const dest: [*]u8 = @ptrCast(&stack);
+                @memcpy(dest, src);
+                // Call original function
+                m_func(dest);
+            }
+        };
+    }
+};
